@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>笔记统计工具</title>
+    
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vis-timeline@latest/standalone/umd/vis-timeline-graph2d.min.js"></script>
+    <link href="https://unpkg.com/vis-timeline@latest/styles/vis-timeline-graph2d.min.css" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/wordcloud@1.2.2/src/wordcloud2.min.js"></script>
+
+    <style>
+        :root { --main-blue: #ebf5ff; --dark-blue: #3b82f6; }
+        body { background-color: var(--main-blue); font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+        .card { background: white; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); padding: 1.5rem; margin-bottom: 1.5rem; }
+        #timeline { height: 400px; border: none; background: white; border-radius: 12px; }
+        .vis-item { border-color: rgba(0,0,0,0.1); color: white; font-weight: bold; }
+        canvas { max-width: 100%; }
+
+        /* 双滑块样式 */
+        .range-slider { position: relative; width: 100%; height: 40px; margin-top: -10px; }
+        .range-slider input { pointer-events: none; position: absolute; overflow: hidden; left: 0; top: 10px; width: 100%; outline: none; height: 18px; margin: 0; -webkit-appearance: none; background: none; }
+        .range-slider input::-webkit-slider-thumb { pointer-events: all; position: relative; z-index: 10; outline: 0; -webkit-appearance: none; height: 18px; width: 18px; border-radius: 50%; background: #3b82f6; border: 2px solid white; box-shadow: 0 1px 3px rgba(0,0,0,0.3); cursor: pointer; }
+        .slider-track { position: absolute; height: 6px; width: 100%; background: #dfe9f5; border-radius: 3px; top: 16px; }
+        .slider-range { position: absolute; height: 6px; background: #3b82f6; border-radius: 3px; top: 16px; opacity: 0.3; }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <nav class="bg-white shadow-sm px-6 py-4 flex justify-between items-center mb-6">
+            <h1 class="text-xl font-bold text-blue-600">NoteAnalytics 2026</h1>
+            <div class="flex items-center gap-4">
+                <input type="file" id="fileInput" class="hidden" @change="handleFileUpload" accept=".json">
+                <label for="fileInput" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg cursor-pointer transition flex items-center gap-2">
+                    <span>上传数据</span>
+                </label>
+            </div>
+        </nav>
+
+        <main class="container mx-auto px-4 pb-12">
+            <div v-if="processedNotes.length" class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                <div class="card flex flex-col items-center justify-center">
+                    <span class="text-gray-500 text-sm">笔记总数</span>
+                    <span class="text-3xl font-bold text-blue-600">{{ stats.count }}</span>
+                </div>
+                <div class="card flex flex-col items-center justify-center">
+                    <span class="text-gray-500 text-sm">总字数</span>
+                    <span class="text-3xl font-bold text-blue-600">{{ stats.totalWords }}</span>
+                </div>
+                <div class="card flex flex-col items-center justify-center text-center">
+                    <span class="text-gray-500 text-sm">最早记录</span>
+                    <span class="text-lg font-semibold">{{ stats.earliest }}</span>
+                </div>
+                <div class="card flex flex-col items-center justify-center text-center">
+                    <span class="text-gray-500 text-sm">最后更新</span>
+                    <span class="text-lg font-semibold">{{ stats.latest }}</span>
+                </div>
+            </div>
+
+            <div class="card" v-show="processedNotes.length">
+                <h3 class="text-lg font-bold mb-4 text-gray-700">时光轨迹</h3>
+                <div id="timeline"></div>
+            </div>
+
+            <div class="card" v-show="processedNotes.length">
+                <div class="flex justify-between items-center mb-6">
+                    <h3 class="text-lg font-bold text-gray-700">数据趋势 (拖动下方滑块筛选词云)</h3>
+                    <div class="flex bg-gray-100 rounded-lg p-1">
+                        <button v-for="scale in ['day', 'month', 'year']" 
+                                @click="timeScale = scale"
+                                :class="['px-4 py-1 rounded-md text-sm transition', timeScale === scale ? 'bg-white shadow text-blue-600' : 'text-gray-500']">
+                            {{ {day:'日', month:'月', year:'年'}[scale] }}
+                        </button>
+                    </div>
+                </div>
+                <div class="relative px-2">
+                    <canvas id="trendsChart" height="100"></canvas>
+                    <div class="range-slider">
+                        <div class="slider-track"></div>
+                        <div class="slider-range" :style="sliderRangeStyle"></div>
+                        <input type="range" v-model.number="filterIndexStart" min="0" :max="filterMax" step="1">
+                        <input type="range" v-model.number="filterIndexEnd" min="0" :max="filterMax" step="1">
+                    </div>
+                    <div class="flex justify-between text-xs text-gray-400 mt-1">
+                        <span>{{ currentFilterRangeText.start }}</span>
+                        <span>{{ currentFilterRangeText.end }}</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6" v-show="processedNotes.length">
+                <div class="card lg:col-span-2">
+                    <h3 class="text-lg font-bold mb-4 text-gray-700">词云图 ({{ filteredNotes.length }} 篇)</h3>
+                    <div class="w-full bg-gray-50 rounded-xl flex items-center justify-center overflow-hidden" style="height: 400px;">
+                        <canvas id="wordCloudCanvas"></canvas>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="text-lg font-bold text-gray-700">选定范围内高频词</h3>
+                        <select v-model="sortMethod" class="text-sm border border-gray-200 rounded px-2 py-1 text-gray-600 outline-none cursor-pointer hover:border-blue-400 transition">
+                            <option value="total">按总词频</option>
+                            <option value="byNote">按笔记数</option>
+                        </select>
+                    </div>
+                    
+                    <div class="overflow-y-auto" style="max-height: 400px;">
+                        <div v-if="topWords.length === 0" class="text-gray-400 text-center py-10">无可选词汇</div>
+                        <table v-else class="w-full text-left">
+                            <tr v-for="(word, index) in topWords" :key="index" class="border-b last:border-0 hover:bg-gray-50">
+                                <td class="py-2 text-gray-400 w-8">{{ index + 1 }}.</td>
+                                <td class="py-2 font-medium text-gray-700">{{ word[0] }}</td>
+                                <td class="py-2 text-right text-blue-500 font-mono">
+                                    {{ word[1] }} {{ sortMethod === 'total' ? '次' : '篇' }}
+                                </td>
+                            </tr>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div v-if="!processedNotes.length" class="flex flex-col items-center justify-center py-20 text-gray-400">
+                <p class="mt-4">暂无数据，请点击右上角上传 JSON 文件</p>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        const { createApp, ref, computed, onMounted, watch, nextTick } = Vue;
+
+        createApp({
+            setup() {
+                const processedNotes = ref([]);
+                const timeScale = ref('month');
+                const sortMethod = ref('total'); // 排序选项：'total' 或 'byNote'
+                
+                const filterIndexStart = ref(0);
+                const filterIndexEnd = ref(100);
+                const filterMax = ref(100);
+
+                let timeline = null;
+                let chart = null;
+
+                const stats = computed(() => {
+                    if (!processedNotes.value.length) return {};
+                    const dates = processedNotes.value.map(n => n.date.getTime());
+                    return {
+                        count: processedNotes.value.length,
+                        totalWords: processedNotes.value.reduce((s, n) => s + n.wordCount, 0),
+                        earliest: new Date(Math.min(...dates)).toLocaleDateString(),
+                        latest: new Date(Math.max(...dates)).toLocaleDateString()
+                    };
+                });
+
+                const currentFilterRangeText = computed(() => {
+                    if (!processedNotes.value.length) return { start: '', end: '' };
+                    const dates = [...processedNotes.value].sort((a,b) => a.date - b.date);
+                    const start = dates[Math.floor((filterIndexStart.value / 100) * (dates.length - 1))];
+                    const end = dates[Math.floor((filterIndexEnd.value / 100) * (dates.length - 1))];
+                    return {
+                        start: start ? start.date.toLocaleDateString() : '',
+                        end: end ? end.date.toLocaleDateString() : ''
+                    };
+                });
+
+                const filteredNotes = computed(() => {
+                    if (!processedNotes.value.length) return [];
+                    const dates = [...processedNotes.value].sort((a,b) => a.date - b.date);
+                    const startVal = Math.min(filterIndexStart.value, filterIndexEnd.value);
+                    const endVal = Math.max(filterIndexStart.value, filterIndexEnd.value);
+                    
+                    const startIdx = Math.floor((startVal / 100) * (dates.length - 1));
+                    const endIdx = Math.floor((endVal / 100) * (dates.length - 1));
+                    
+                    return dates.slice(startIdx, endIdx + 1);
+                });
+
+                const sliderRangeStyle = computed(() => {
+                    const start = Math.min(filterIndexStart.value, filterIndexEnd.value);
+                    const end = Math.max(filterIndexStart.value, filterIndexEnd.value);
+                    return { left: start + '%', width: (end - start) + '%' };
+                });
+
+                // 核心改动：支持两种排序方式的 topWords 计算
+                const topWords = computed(() => {
+                    if (!filteredNotes.value.length) return [];
+                    const wordsMatchRegex = /[\u4e00-\u9fa5]{2,}|[a-zA-Z]{3,}/g;
+                    const freq = {};
+
+                    if (sortMethod.value === 'total') {
+                        // 1. 按总词频统计
+                        const text = filteredNotes.value.map(n => n.rawContent).join(' ');
+                        const words = text.match(wordsMatchRegex) || [];
+                        words.forEach(w => freq[w] = (freq[w] || 0) + 1);
+                    } else {
+                        // 2. 按出现在不同笔记的数量统计
+                        filteredNotes.value.forEach(note => {
+                            const words = note.rawContent.match(wordsMatchRegex) || [];
+                            const uniqueWordsInNote = new Set(words); // 单篇去重
+                            uniqueWordsInNote.forEach(w => {
+                                freq[w] = (freq[w] || 0) + 1;
+                            });
+                        });
+                    }
+
+                    return Object.entries(freq)
+                        .sort((a, b) => b[1] - a[1])
+                        .slice(0, 15);
+                });
+
+                const handleFileUpload = (event) => {
+                    const file = event.target.files[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        try {
+                            const json = JSON.parse(e.target.result);
+                            processNotes(json.activeNotes || []);
+                        } catch (err) { alert("文件格式有误。"); }
+                    };
+                    reader.readAsText(file);
+                };
+
+                const processNotes = (notes) => {
+                    const maxWords = Math.max(...notes.map(n => n.content.length)) || 1;
+                    processedNotes.value = notes.map(n => {
+                        const title = n.content.split('\n')[0].trim().substring(0, 20) || "无标题";
+                        const wordCount = n.content.length;
+                        const ratio = Math.min(wordCount / (maxWords * 0.8), 1);
+                        const hue = ((1 - ratio) * 120).toString(10);
+                        return {
+                            id: n.id, content: title, rawContent: n.content,
+                            start: n.creationDate, date: new Date(n.creationDate),
+                            wordCount: wordCount,
+                            style: `background-color: hsl(${hue}, 70%, 45%);`,
+                            title: `字数: ${wordCount}`
+                        };
+                    });
+
+                    filterIndexStart.value = 0;
+                    filterIndexEnd.value = 100;
+
+                    renderTimeline();
+                    renderChart();
+                    renderWordCloud();
+                };
+
+                const renderTimeline = () => {
+                    const container = document.getElementById('timeline');
+                    if (timeline) timeline.destroy();
+                    const items = new vis.DataSet(processedNotes.value);
+                    timeline = new vis.Timeline(container, items, {
+                        height: '400px', zoomKey: 'ctrlKey', type: 'point', stack: true
+                    });
+                };
+
+                const renderChart = () => {
+                    const ctx = document.getElementById('trendsChart').getContext('2d');
+                    if (chart) chart.destroy();
+
+                    const groups = {};
+                    processedNotes.value.forEach(n => {
+                        let key;
+                        const d = n.date;
+                        if (timeScale.value === 'day') key = d.toISOString().split('T')[0];
+                        else if (timeScale.value === 'month') key = `${d.getFullYear()}-${d.getMonth() + 1}`;
+                        else key = `${d.getFullYear()}`;
+                        if (!groups[key]) groups[key] = { count: 0, words: 0 };
+                        groups[key].count++;
+                        groups[key].words += n.wordCount;
+                    });
+
+                    const labels = Object.keys(groups).sort();
+                    chart = new Chart(ctx, {
+                        type: 'bar',
+                        data: {
+                            labels: labels,
+                            datasets: [
+                                { label: '篇数', data: labels.map(l => groups[l].count), backgroundColor: 'rgba(59, 130, 246, 0.5)', yAxisID: 'y' },
+                                { label: '总字数', data: labels.map(l => groups[l].words), type: 'line', borderColor: '#ef4444', borderWidth: 2, yAxisID: 'y1' }
+                            ]
+                        },
+                        options: { responsive: true, scales: { y: { display: false }, y1: { display: false } }, plugins: { legend: { display: false } } }
+                    });
+                };
+
+                const renderWordCloud = () => {
+                    const canvas = document.getElementById('wordCloudCanvas');
+                    if (!canvas) return;
+                    const container = canvas.parentElement;
+                    canvas.width = container.offsetWidth;
+                    canvas.height = 400;
+
+                    if (topWords.value.length === 0) {
+                        const ctx = canvas.getContext('2d');
+                        ctx.clearRect(0, 0, canvas.width, canvas.height);
+                        return;
+                    }
+
+                    const maxCount = topWords.value[0][1];
+                    const list = topWords.value.map(w => [w[0], Math.max((w[1] / maxCount) * 80, 12)]);
+                    
+                    WordCloud(canvas, {
+                        list: list, gridSize: 8, weightFactor: 1, fontFamily: 'PingFang SC',
+                        color: () => `hsl(${Math.random() * 40 + 200}, 70%, 50%)`,
+                        rotateRatio: 0, backgroundColor: '#f9fafb', drawOutOfBound: false, shrinkToFit: true
+                    });
+                };
+
+                watch(timeScale, () => { if (processedNotes.value.length) renderChart(); });
+
+                // 监听排序方式、筛选范围变化
+                let timer = null;
+                watch([filterIndexStart, filterIndexEnd, sortMethod, topWords], () => {
+                    if (timer) clearTimeout(timer);
+                    timer = setTimeout(() => {
+                        renderWordCloud();
+                    }, 100);
+                });
+
+                return {
+                    handleFileUpload, processedNotes, stats, timeScale, topWords,
+                    filterIndexStart, filterIndexEnd, filterMax, sliderRangeStyle,
+                    filteredNotes, currentFilterRangeText, sortMethod
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
